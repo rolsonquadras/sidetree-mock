@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"fmt"
+
 	"os"
 	"os/signal"
 	"strings"
@@ -19,11 +20,11 @@ import (
 
 	"github.com/trustbloc/sidetree-core-go/pkg/batch"
 	"github.com/trustbloc/sidetree-core-go/pkg/dochandler"
-	"github.com/trustbloc/sidetree-core-go/pkg/dochandler/didvalidator"
 	"github.com/trustbloc/sidetree-core-go/pkg/processor"
+	restcommon "github.com/trustbloc/sidetree-core-go/pkg/restapi/common"
 	"github.com/trustbloc/sidetree-core-go/pkg/restapi/diddochandler"
-
 	sidetreecontext "github.com/trustbloc/sidetree-mock/pkg/context"
+	discoveryrest "github.com/trustbloc/sidetree-mock/pkg/discovery/endpoint/restapi"
 	"github.com/trustbloc/sidetree-mock/pkg/httpserver"
 	"github.com/trustbloc/sidetree-mock/pkg/mocks"
 	"github.com/trustbloc/sidetree-mock/pkg/observer"
@@ -33,8 +34,11 @@ var logger = logrus.New()
 var config = viper.New()
 
 const defaultDIDDocNamespace = "did:sidetree"
-const basePath = "/sidetree/0.0.1"
-const ctxDelimiter = ","
+
+const operationPath = "/sidetree/v1/operations"
+const resolutionPath = "/sidetree/v1/identifiers"
+
+const arrayDelimiter = ","
 
 func main() {
 	config.SetEnvPrefix("SIDETREE_MOCK")
@@ -45,22 +49,35 @@ func main() {
 
 	opStore := mocks.NewMockOperationStore()
 
-	ctx, err := sidetreecontext.New(opStore)
-	if err != nil {
-		logger.Errorf("Failed to create new context: %s", err.Error())
-		panic(err)
-	}
-
 	didDocNamespace := defaultDIDDocNamespace
 
 	if config.GetString("did.namespace") != "" {
 		didDocNamespace = config.GetString("did.namespace")
 	}
 
+	var aliases []string
+	if config.GetString("did.aliases") != "" {
+		aliases = strings.Split(config.GetString("did.aliases"), arrayDelimiter)
+	}
+
 	var methodCtx []string
 	if config.GetString("did.method.context") != "" {
-		methodCtx = strings.Split(config.GetString("did.method.context"), ctxDelimiter)
+		methodCtx = strings.Split(config.GetString("did.method.context"), arrayDelimiter)
 	}
+
+	baseEnabled := false
+	if config.GetString("did.base.enabled") != "" {
+		baseEnabled = config.GetBool("did.base.enabled")
+	}
+
+	pcp := mocks.NewMockProtocolClientProvider().WithOpStore(opStore).WithOpStoreClient(opStore).WithMethodContext(methodCtx).WithBase(baseEnabled)
+	pc, err := pcp.ForNamespace(mocks.DefaultNS)
+	if err != nil {
+		logger.Errorf("Failed to get protocol client for namespace [%s]: %s", mocks.DefaultNS, err.Error())
+		panic(err)
+	}
+
+	ctx := sidetreecontext.New(pc)
 
 	// create new batch writer
 	batchWriter, err := batch.New(didDocNamespace, ctx)
@@ -73,24 +90,40 @@ func main() {
 	batchWriter.Start()
 
 	// start observer
-	observer.Start(ctx.Blockchain(), ctx.CAS(), mocks.NewMockOpStoreProvider(opStore), mocks.NewMockProtocolClientProvider())
+	observer.Start(ctx.Anchor(), pcp)
 
 	// did document handler with did document validator for didDocNamespace
 	didDocHandler := dochandler.New(
 		didDocNamespace,
-		ctx.Protocol(),
-		didvalidator.New(ctx.OperationStore(), didvalidator.WithMethodContext(methodCtx)),
+		aliases,
+		pc,
 		batchWriter,
-		processor.New(didDocNamespace, ctx.OperationStore(), mocks.NewMockProtocolClient()),
+		processor.New(didDocNamespace, opStore, pc),
 	)
+
+	// create discovery rest api
+	endpointDiscoveryOp := discoveryrest.New(&discoveryrest.Config{
+		ResolutionPath: resolutionPath,
+		OperationPath:  operationPath,
+		BaseURL:        config.GetString("external.endpoint"),
+		WellKnownPath:  config.GetString("wellknown.path"),
+	})
+
+	handlers := make([]restcommon.HTTPHandler, 0)
+
+	handlers = append(handlers,
+		diddochandler.NewUpdateHandler(operationPath, didDocHandler, pc),
+		diddochandler.NewResolveHandler(resolutionPath, didDocHandler))
+
+	handlers = append(handlers,
+		endpointDiscoveryOp.GetRESTHandlers()...)
 
 	restSvc := httpserver.New(
 		getListenURL(),
 		config.GetString("tls.certificate"),
 		config.GetString("tls.key"),
 		config.GetString("api.token"),
-		diddochandler.NewUpdateHandler(basePath, didDocHandler),
-		diddochandler.NewResolveHandler(basePath, didDocHandler),
+		handlers...,
 	)
 
 	if restSvc.Start() != nil {

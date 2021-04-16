@@ -43,8 +43,14 @@ func New(url, certFile, keyFile, token string, handlers ...common.HTTPHandler) *
 		router.HandleFunc(handler.Path(), handler.Handler()).Methods(handler.Method())
 	}
 
-	// TODO configure cors
-	handler := cors.Default().Handler(router)
+	handler := cors.New(
+		cors.Options{
+			AllowedMethods: []string{
+				http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions,
+			},
+			AllowedHeaders: []string{"*"},
+		},
+	).Handler(router)
 
 	return &Server{
 		httpServer: &http.Server{
@@ -98,7 +104,7 @@ func (s *Server) Start() error {
 			err = s.httpServer.ListenAndServe()
 		}
 
-		if err != nil && err != http.ErrServerClosed {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			panic(fmt.Sprintf("Failed to start server on [%s]: %s", s.httpServer.Addr, err))
 		}
 		atomic.StoreUint32(&s.started, 0)

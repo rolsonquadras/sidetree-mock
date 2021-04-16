@@ -8,69 +8,176 @@ package mocks
 
 import (
 	"fmt"
+	"sync"
 
+	"github.com/trustbloc/sidetree-core-go/pkg/api/cas"
 	"github.com/trustbloc/sidetree-core-go/pkg/api/protocol"
+	"github.com/trustbloc/sidetree-core-go/pkg/compression"
+	"github.com/trustbloc/sidetree-core-go/pkg/mocks"
+	"github.com/trustbloc/sidetree-core-go/pkg/processor"
+	"github.com/trustbloc/sidetree-core-go/pkg/versions/1_0/doccomposer"
+	"github.com/trustbloc/sidetree-core-go/pkg/versions/1_0/doctransformer/didtransformer"
+	"github.com/trustbloc/sidetree-core-go/pkg/versions/1_0/docvalidator/didvalidator"
+	"github.com/trustbloc/sidetree-core-go/pkg/versions/1_0/operationapplier"
+	"github.com/trustbloc/sidetree-core-go/pkg/versions/1_0/operationparser"
+	"github.com/trustbloc/sidetree-core-go/pkg/versions/1_0/txnprocessor"
+	"github.com/trustbloc/sidetree-core-go/pkg/versions/1_0/txnprovider"
 )
 
-const maxBatchFileSize = 2000000 // in bytes
+// DefaultNS is default namespace used in mocks
+const DefaultNS = "did:sidetree"
+
+// maximum batch files size in bytes
+const maxBatchFileSize = 20000
 
 // MockProtocolClient mocks protocol for testing purposes.
 type MockProtocolClient struct {
-	protocols []protocol.Protocol
-}
-
-// NewMockProtocolClient creates mocks protocol client
-func NewMockProtocolClient() *MockProtocolClient {
-	latest := protocol.Protocol{
-		GenesisTime:                  0,
-		HashAlgorithmInMultiHashCode: 18,
-		HashAlgorithm:                5, // crypto code for sha256 hash function
-		MaxOperationCount:            1, // one operation per batch - batch gets cut right away
-		MaxOperationSize:             200000,
-		CompressionAlgorithm:         "GZIP",
-		MaxChunkFileSize:             maxBatchFileSize,
-		MaxMapFileSize:               maxBatchFileSize,
-		MaxAnchorFileSize:            maxBatchFileSize,
-		EnableReplacePatch:           true,
-		SignatureAlgorithms:          []string{"EdDSA", "ES256", "ES256K"},
-		KeyAlgorithms:                []string{"Ed25519", "P-256", "secp256k1"},
-	}
-
-	// has to be sorted for mock client to work
-	versions := []protocol.Protocol{latest}
-
-	return &MockProtocolClient{protocols: versions}
+	currentVersion *mocks.ProtocolVersion
+	versions       []*mocks.ProtocolVersion
 }
 
 // Current mocks getting last protocol version
-func (m *MockProtocolClient) Current() (protocol.Protocol, error) {
-	return m.protocols[len(m.protocols)-1], nil
+func (m *MockProtocolClient) Current() (protocol.Version, error) {
+	return m.currentVersion, nil
 }
 
 // Get mocks getting protocol version based on blockchain(transaction) time
-func (m *MockProtocolClient) Get(transactionTime uint64) (protocol.Protocol, error) {
-	for i := len(m.protocols) - 1; i >= 0; i-- {
-		if transactionTime >= m.protocols[i].GenesisTime {
-			return m.protocols[i], nil
+func (m *MockProtocolClient) Get(transactionTime uint64) (protocol.Version, error) {
+	for i := len(m.versions) - 1; i >= 0; i-- {
+		if transactionTime >= m.versions[i].Protocol().GenesisTime {
+			return m.versions[i], nil
 		}
 	}
 
-	return protocol.Protocol{}, fmt.Errorf("protocol parameters are not defined for block chain time: %d", transactionTime)
+	return nil, fmt.Errorf("protocol parameters are not defined for blockchain time: %d", transactionTime)
 }
 
 // NewMockProtocolClientProvider creates new mock protocol client provider
 func NewMockProtocolClientProvider() *MockProtocolClientProvider {
+	opStore := NewMockOperationStore()
+	casClient := NewMockCasClient(nil)
+
 	return &MockProtocolClientProvider{
-		ProtocolClient: NewMockProtocolClient(),
+		clients:       make(map[string]protocol.Client),
+		opStore:       opStore,
+		opStoreClient: opStore,
+		casClient:     casClient,
 	}
 }
 
 // MockProtocolClientProvider implements mock protocol client provider
 type MockProtocolClientProvider struct {
-	ProtocolClient protocol.Client
+	mutex         sync.Mutex
+	clients       map[string]protocol.Client
+	opStoreClient processor.OperationStoreClient
+	opStore       txnprocessor.OperationStore
+	casClient     cas.Client
+	methodCtx     []string
+	baseEnabled   bool
 }
 
-// ForNamespace provides protocol client for namespace
+// WithOpStoreClient sets the operation store client
+func (m *MockProtocolClientProvider) WithOpStoreClient(opStoreClient processor.OperationStoreClient) *MockProtocolClientProvider {
+	m.opStoreClient = opStoreClient
+
+	return m
+}
+
+// WithOpStore sets the operation store
+func (m *MockProtocolClientProvider) WithOpStore(opStore txnprocessor.OperationStore) *MockProtocolClientProvider {
+	m.opStore = opStore
+
+	return m
+}
+
+// WithCasClient sets the CAS client
+func (m *MockProtocolClientProvider) WithCasClient(casClient cas.Client) *MockProtocolClientProvider {
+	m.casClient = casClient
+
+	return m
+}
+
+// WithMethodContext sets method context for document transformer
+func (m *MockProtocolClientProvider) WithMethodContext(ctx []string) *MockProtocolClientProvider {
+	m.methodCtx = ctx
+
+	return m
+}
+
+//WithBase enables @base property during document transformation
+func (m *MockProtocolClientProvider) WithBase(enabled bool) *MockProtocolClientProvider {
+	m.baseEnabled = enabled
+
+	return m
+}
+
+// ForNamespace will return protocol client for that namespace
 func (m *MockProtocolClientProvider) ForNamespace(namespace string) (protocol.Client, error) {
-	return m.ProtocolClient, nil
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	pc, ok := m.clients[namespace]
+	if !ok {
+		pc = m.create()
+		m.clients[namespace] = pc
+	}
+
+	return pc, nil
+}
+
+func (m *MockProtocolClientProvider) create() *MockProtocolClient {
+	//nolint:gomnd
+	latest := protocol.Protocol{
+		GenesisTime:                  0,
+		MultihashAlgorithms:          []uint{18},
+		MaxOperationCount:            1,    // one operation per batch - batch gets cut right away
+		MaxOperationSize:             2500, // has to be bigger than max delta + max proof + small number for type
+		MaxOperationHashLength:       100,
+		MaxDeltaSize:                 1700, // interop tests pass for 1000, our test is about 1100 since we have multiple public keys/services
+		MaxCasURILength:              100,
+		CompressionAlgorithm:         "GZIP",
+		MaxChunkFileSize:             maxBatchFileSize,
+		MaxProvisionalIndexFileSize:  maxBatchFileSize,
+		MaxCoreIndexFileSize:         maxBatchFileSize,
+		MaxProofFileSize:             maxBatchFileSize,
+		Patches:                      []string{"replace", "add-public-keys", "remove-public-keys", "add-services", "remove-services", "ietf-json-patch"},
+		SignatureAlgorithms:          []string{"EdDSA", "ES256", "ES256K"},
+		KeyAlgorithms:                []string{"Ed25519", "P-256", "secp256k1"},
+		NonceSize:                    16,
+		MaxMemoryDecompressionFactor: 3,
+	}
+
+	parser := operationparser.New(latest)
+	cp := compression.New(compression.WithDefaultAlgorithms())
+	op := txnprovider.NewOperationProvider(latest, parser, m.casClient, cp)
+	th := txnprovider.NewOperationHandler(latest, m.casClient, cp, parser)
+	dc := doccomposer.New()
+	oa := operationapplier.New(latest, parser, dc)
+
+	dv := didvalidator.New(m.opStoreClient)
+	dt := didtransformer.New(didtransformer.WithMethodContext(m.methodCtx), didtransformer.WithBase(m.baseEnabled))
+
+	txnProcessor := txnprocessor.New(
+		&txnprocessor.Providers{
+			OpStore:                   m.opStore,
+			OperationProtocolProvider: op,
+		},
+	)
+
+	pv := &mocks.ProtocolVersion{}
+	pv.OperationApplierReturns(oa)
+	pv.OperationParserReturns(parser)
+	pv.DocumentComposerReturns(dc)
+	pv.DocumentValidatorReturns(dv)
+	pv.DocumentTransformerReturns(dt)
+	pv.OperationProviderReturns(op)
+	pv.OperationHandlerReturns(th)
+	pv.TransactionProcessorReturns(txnProcessor)
+
+	pv.ProtocolReturns(latest)
+
+	return &MockProtocolClient{
+		currentVersion: pv,
+		versions:       []*mocks.ProtocolVersion{pv},
+	}
 }

@@ -9,21 +9,16 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-
-	"github.com/trustbloc/sidetree-core-go/pkg/api/cas"
 	"github.com/trustbloc/sidetree-core-go/pkg/api/protocol"
 	"github.com/trustbloc/sidetree-core-go/pkg/api/txn"
 	"github.com/trustbloc/sidetree-core-go/pkg/batch"
-	"github.com/trustbloc/sidetree-core-go/pkg/compression"
-	"github.com/trustbloc/sidetree-core-go/pkg/txnhandler"
-
 	sidetreeobserver "github.com/trustbloc/sidetree-core-go/pkg/observer"
 )
 
 var logger = logrus.New()
 
 type ledger struct {
-	blockChainClient batch.BlockchainClient
+	anchorWriter batch.AnchorWriter
 }
 
 func (l *ledger) RegisterForSidetreeTxn() <-chan []txn.SidetreeTxn {
@@ -37,7 +32,7 @@ func (l *ledger) RegisterForSidetreeTxn() <-chan []txn.SidetreeTxn {
 			sidetreeTxns := make([]txn.SidetreeTxn, 0)
 			for moreTransactions {
 				var sidetreeTxn *txn.SidetreeTxn
-				moreTransactions, sidetreeTxn = l.blockChainClient.Read(sinceTransactionNumber)
+				moreTransactions, sidetreeTxn = l.anchorWriter.Read(sinceTransactionNumber)
 				if sidetreeTxn != nil {
 					sinceTransactionNumber = int(sidetreeTxn.TransactionNumber)
 					logger.Debugf("found sidetree txn %d in ledger", sidetreeTxn.TransactionNumber)
@@ -53,11 +48,10 @@ func (l *ledger) RegisterForSidetreeTxn() <-chan []txn.SidetreeTxn {
 }
 
 // Start starts observer routines
-func Start(blockchainClient batch.BlockchainClient, cas cas.Client, operationStoreProvider sidetreeobserver.OperationStoreProvider, pcp protocol.ClientProvider) {
+func Start(anchorWriter batch.AnchorWriter, pcp protocol.ClientProvider) {
 	providers := &sidetreeobserver.Providers{
-		Ledger:          &ledger{blockChainClient: blockchainClient},
-		TxnOpsProvider:  txnhandler.NewOperationProvider(cas, pcp, compression.New(compression.WithDefaultAlgorithms())),
-		OpStoreProvider: operationStoreProvider,
+		Ledger:                 &ledger{anchorWriter: anchorWriter},
+		ProtocolClientProvider: pcp,
 	}
 
 	sidetreeobserver.New(providers).Start()

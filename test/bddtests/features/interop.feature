@@ -5,61 +5,49 @@
 #
 
 # Each test has to be run on fresh system since create document is the same for all tests
-@did-interop
+@did_interop
 Feature:
 
-    @interop_resolve_with_initial_value
-    Scenario: resolve document with initial value
-      When client sends interop resolve with initial value request
-      Then check success response contains "EiBFsUlzmZ3zJtSFeQKwJNtngjmB51ehMWWDuptf9b4Bag"
+    @interop_longform_create_update_doc
+    Scenario: interop test for create/update operations and long form DID resolution
+      When client discover endpoints
+      When client sends "long-form-did" resolve request from "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/vectors/generated.json"
+      Then success response matches resolution result "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/vectors/resolution/longFormResponseDidDocument.json"
 
-    @interop_create_doc
-    Scenario: create valid did doc
-      When client sends operation request from "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/fixtures/create/create.json"
-      Then success response is validated against resolution result "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/fixtures/create/resultingDocument.json"
-
-      Then we wait 1 seconds
-      When client sends request to resolve DID document
-      Then success response is validated against resolution result "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/fixtures/create/resultingDocument.json"
-
-    @interop_deactivate_doc
-    Scenario: interop test for deactivate operation
-      When client sends operation request from "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/fixtures/deactivate/create.json"
+      When client sends "create" operation request from "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/vectors/generated.json"
+      Then success response is validated against resolution result "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/vectors/resolution/afterCreate.json"
 
       Then we wait 1 seconds
       When client sends request to resolve DID document
-      Then check success response contains "#didDocumentHash"
+      Then success response matches resolution result "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/vectors/resolution/afterCreate.json"
 
-      When client sends operation request from "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/fixtures/deactivate/deactivate.json"
-
-      Then we wait 1 seconds
-      When client sends request to resolve DID document
-      Then check error response contains "document is no longer available"
-
-    @interop_recover_doc
-    Scenario: interop test for recover operation
-      When client sends operation request from "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/fixtures/recover/create.json"
+      When client sends "update" operation request from "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/vectors/generated.json"
 
       Then we wait 1 seconds
       When client sends request to resolve DID document
-      Then check success response contains "#didDocumentHash"
+      Then success response matches resolution result "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/vectors/resolution/afterUpdate.json"
 
-      When client sends operation request from "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/fixtures/recover/recover.json"
-
-      Then we wait 1 seconds
-      When client sends request to resolve DID document
-      Then success response is validated against resolution result "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/fixtures/recover/resultingDocument.json"
-
-    @interop_update_doc
-    Scenario: interop test for update operation
-      When client sends operation request from "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/fixtures/update/create.json"
+    @interop_create_recover_deactivate_doc
+    Scenario: interop test for recover/deactivate operations
+      When client discover endpoints
+      When client sends "create" operation request from "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/vectors/generated.json"
 
       Then we wait 1 seconds
       When client sends request to resolve DID document
-      Then check success response contains "#didDocumentHash"
+      Then check success response contains "#did"
 
-      When client sends operation request from "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/fixtures/update/update.json"
+      When client sends "recover" operation request from "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/vectors/generated.json"
 
       Then we wait 1 seconds
       When client sends request to resolve DID document
-      Then success response is validated against resolution result "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/fixtures/update/resultingDocument.json"
+      Then success response matches resolution result "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/vectors/resolution/afterRecover.json"
+
+      When client sends "deactivate" operation request from "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/vectors/generated.json"
+
+      Then we wait 1 seconds
+      When client sends request to resolve DID document
+      Then check success response contains "deactivated"
+
+      # TODO: Remove comment bellow when reference app adds "deactivate" flag to response
+      # Then success response matches resolution result "https://raw.githubusercontent.com/decentralized-identity/sidetree/master/tests/vectors/resolution/afterDeactivate.json"
+
