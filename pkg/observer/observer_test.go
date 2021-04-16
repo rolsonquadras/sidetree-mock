@@ -6,22 +6,27 @@ SPDX-License-Identifier: Apache-2.0
 package observer
 
 import (
-	"encoding/json"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"github.com/trustbloc/sidetree-core-go/pkg/api/batch"
+
+	"github.com/trustbloc/sidetree-core-go/pkg/api/operation"
 	"github.com/trustbloc/sidetree-core-go/pkg/api/txn"
+	"github.com/trustbloc/sidetree-core-go/pkg/commitment"
 	"github.com/trustbloc/sidetree-core-go/pkg/compression"
 	"github.com/trustbloc/sidetree-core-go/pkg/docutil"
+	"github.com/trustbloc/sidetree-core-go/pkg/hashing"
+	"github.com/trustbloc/sidetree-core-go/pkg/jws"
 	"github.com/trustbloc/sidetree-core-go/pkg/patch"
-	"github.com/trustbloc/sidetree-core-go/pkg/restapi/model"
-	"github.com/trustbloc/sidetree-core-go/pkg/txnhandler/models"
+	"github.com/trustbloc/sidetree-core-go/pkg/versions/1_0/model"
+	"github.com/trustbloc/sidetree-core-go/pkg/versions/1_0/txnprovider/models"
 
 	"github.com/trustbloc/sidetree-mock/pkg/mocks"
 )
+
+const sha2_256 = 18
 
 func TestStartObserver(t *testing.T) {
 	t.Run("test success", func(t *testing.T) {
@@ -29,36 +34,47 @@ func TestStartObserver(t *testing.T) {
 		txNum := make(map[uint64]*struct{}, 0)
 		hits := 0
 
-		opStore := &mockOperationStoreClient{putFunc: func(ops []*batch.AnchoredOperation) error {
-			rw.Lock()
-			defer rw.Unlock()
+		opStore := &mockOperationStoreClient{
+			putFunc: func(ops []*operation.AnchoredOperation) error {
+				rw.Lock()
+				defer rw.Unlock()
 
-			for _, op := range ops {
-				txNum[op.TransactionNumber] = nil
-				hits++
-			}
+				for _, op := range ops {
+					txNum[op.TransactionNumber] = nil
+					hits++
+				}
 
-			return nil
-		}}
+				return nil
+			},
+		}
 
-		Start(&mockBlockchainClient{readValue: []*txn.SidetreeTxn{{AnchorString: "1.anchorAddress", TransactionNumber: 0},
-			{AnchorString: "1.anchorAddress", TransactionNumber: 1}}}, mockCASClient{readFunc: func(key string) ([]byte, error) {
+		bcc := &mockAnchorWriter{
+			readValue: []*txn.SidetreeTxn{
+				{Namespace: mocks.DefaultNS, AnchorString: "1.anchorAddress", TransactionNumber: 0},
+				{Namespace: mocks.DefaultNS, AnchorString: "1.anchorAddress", TransactionNumber: 1}},
+		}
+
+		casClient := mockCASClient{readFunc: func(key string) ([]byte, error) {
 			if key == "anchorAddress" {
-				return compress(&models.AnchorFile{MapFileHash: "mapAddress",
-					Operations: models.Operations{
-						Create: []models.CreateOperation{{
+				return compress(&models.CoreIndexFile{ProvisionalIndexFileURI: "provisionalIndexAddress",
+					Operations: &models.CoreOperations{
+						Create: []models.CreateReference{{
 							SuffixData: getSuffixData(),
 						}}}})
 			}
-			if key == "mapAddress" {
-				return compress(&models.MapFile{Chunks: []models.Chunk{{ChunkFileURI: "chunkAddress"}}})
+			if key == "provisionalIndexAddress" {
+				return compress(&models.ProvisionalIndexFile{Chunks: []models.Chunk{{ChunkFileURI: "chunkAddress"}}})
 			}
 			if key == "chunkAddress" {
-				return compress(&models.ChunkFile{Deltas: []string{getDelta()}})
+				return compress(&models.ChunkFile{Deltas: []*model.DeltaModel{getDelta()}})
 			}
 			return nil, nil
-		}}, mocks.NewMockOpStoreProvider(opStore), mocks.NewMockProtocolClientProvider())
+		}}
+
+		Start(bcc, mocks.NewMockProtocolClientProvider().WithOpStore(opStore).WithCasClient(casClient))
+
 		time.Sleep(2000 * time.Millisecond)
+
 		rw.RLock()
 		require.Equal(t, 2, hits)
 		require.Equal(t, 2, len(txNum))
@@ -71,16 +87,16 @@ func TestStartObserver(t *testing.T) {
 	})
 }
 
-type mockBlockchainClient struct {
+type mockAnchorWriter struct {
 	readValue []*txn.SidetreeTxn
 }
 
-// Read ledger transaction
-func (m mockBlockchainClient) WriteAnchor(anchor string) error {
+func (m mockAnchorWriter) WriteAnchor(anchor string, _ []*operation.Reference, _ uint64) error {
 	return nil
 
 }
-func (m mockBlockchainClient) Read(sinceTransactionNumber int) (bool, *txn.SidetreeTxn) {
+
+func (m mockAnchorWriter) Read(sinceTransactionNumber int) (bool, *txn.SidetreeTxn) {
 	if sinceTransactionNumber+1 >= len(m.readValue) {
 		return false, nil
 	}
@@ -103,57 +119,48 @@ func (m mockCASClient) Read(key string) ([]byte, error) {
 }
 
 type mockOperationStoreClient struct {
-	putFunc func(ops []*batch.AnchoredOperation) error
+	putFunc func(ops []*operation.AnchoredOperation) error
 }
 
-func (m mockOperationStoreClient) Put(ops []*batch.AnchoredOperation) error {
+func (m mockOperationStoreClient) Put(ops []*operation.AnchoredOperation) error {
 	if m.putFunc != nil {
 		return m.putFunc(ops)
 	}
 	return nil
 }
 
-func getSuffixData() string {
-	model := &model.SuffixDataModel{
-		DeltaHash: getEncodedMultihash([]byte(validDoc)),
-
-		RecoveryCommitment: getEncodedMultihash([]byte("commitment")),
-	}
-
-	bytes, err := json.Marshal(model)
+func getSuffixData() *model.SuffixDataModel {
+	deltaHash, err := hashing.CalculateModelMultihash(getDelta(), sha2_256)
 	if err != nil {
 		panic(err)
 	}
 
-	return docutil.EncodeToString(bytes)
-}
-
-func getEncodedMultihash(data []byte) string {
-	const sha2_256 = 18
-	mh, err := docutil.ComputeMultihash(sha2_256, data)
+	recoveryCommitment, err := commitment.GetCommitment(&jws.JWK{}, sha2_256)
 	if err != nil {
 		panic(err)
 	}
-	return docutil.EncodeToString(mh)
+
+	return &model.SuffixDataModel{
+		DeltaHash:          deltaHash,
+		RecoveryCommitment: recoveryCommitment,
+	}
 }
 
-func getDelta() string {
+func getDelta() *model.DeltaModel {
 	patches, err := patch.PatchesFromDocument(validDoc)
 	if err != nil {
 		panic(err)
 	}
 
-	model := &model.DeltaModel{
-		Patches:          patches,
-		UpdateCommitment: getEncodedMultihash([]byte("")),
-	}
-
-	bytes, err := json.Marshal(model)
+	c, err := commitment.GetCommitment(&jws.JWK{}, sha2_256)
 	if err != nil {
 		panic(err)
 	}
 
-	return docutil.EncodeToString(bytes)
+	return &model.DeltaModel{
+		Patches:          patches,
+		UpdateCommitment: c,
+	}
 }
 
 func compress(model interface{}) ([]byte, error) {

@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/trustbloc/sidetree-core-go/pkg/api/batch"
+	"github.com/trustbloc/sidetree-core-go/pkg/api/operation"
 	"github.com/trustbloc/sidetree-core-go/pkg/observer"
 )
 
@@ -33,21 +33,21 @@ func (m *MockOpStoreProvider) ForNamespace(string) (observer.OperationStore, err
 // MockOperationStore is a mock operation store
 type MockOperationStore struct {
 	sync.RWMutex
-	operations map[string][]*batch.AnchoredOperation
+	operations map[string][]*operation.AnchoredOperation
 }
 
 // NewMockOperationStore returns a new mock operation store
 func NewMockOperationStore() *MockOperationStore {
-	return &MockOperationStore{operations: make(map[string][]*batch.AnchoredOperation)}
+	return &MockOperationStore{operations: make(map[string][]*operation.AnchoredOperation)}
 }
 
 // Put stores the given operations
-func (m *MockOperationStore) Put(ops []*batch.AnchoredOperation) error {
+func (m *MockOperationStore) Put(ops []*operation.AnchoredOperation) error {
 	m.Lock()
 	defer m.Unlock()
 
 	for _, op := range ops {
-		fmt.Printf("Putting operation %+v\n", op)
+		fmt.Printf("Putting operation type[%s], suffix[%s], txtime[%d], txnum[%d], pg[%d], buffer: %s\n", op.Type, op.UniqueSuffix, op.TransactionTime, op.TransactionNumber, op.ProtocolGenesisTime, string(op.OperationBuffer))
 		m.operations[op.UniqueSuffix] = append(m.operations[op.UniqueSuffix], op)
 	}
 
@@ -56,7 +56,7 @@ func (m *MockOperationStore) Put(ops []*batch.AnchoredOperation) error {
 }
 
 // Get retrieves the operations for the given suffix
-func (m *MockOperationStore) Get(suffix string) ([]*batch.AnchoredOperation, error) {
+func (m *MockOperationStore) Get(suffix string) ([]*operation.AnchoredOperation, error) {
 	m.RLock()
 	defer m.RUnlock()
 

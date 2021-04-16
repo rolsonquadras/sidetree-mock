@@ -9,7 +9,6 @@ package httpserver
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -19,16 +18,19 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/trustbloc/sidetree-core-go/pkg/api/protocol"
 	"github.com/trustbloc/sidetree-core-go/pkg/commitment"
 	"github.com/trustbloc/sidetree-core-go/pkg/document"
 	"github.com/trustbloc/sidetree-core-go/pkg/docutil"
 	"github.com/trustbloc/sidetree-core-go/pkg/jws"
-	"github.com/trustbloc/sidetree-core-go/pkg/mocks"
+	coremocks "github.com/trustbloc/sidetree-core-go/pkg/mocks"
 	"github.com/trustbloc/sidetree-core-go/pkg/restapi/common"
 	"github.com/trustbloc/sidetree-core-go/pkg/restapi/diddochandler"
 	"github.com/trustbloc/sidetree-core-go/pkg/restapi/dochandler"
-	"github.com/trustbloc/sidetree-core-go/pkg/restapi/helper"
-	"github.com/trustbloc/sidetree-core-go/pkg/restapi/model"
+	"github.com/trustbloc/sidetree-core-go/pkg/versions/1_0/client"
+	"github.com/trustbloc/sidetree-core-go/pkg/versions/1_0/model"
+
+	"github.com/trustbloc/sidetree-mock/pkg/mocks"
 )
 
 const (
@@ -36,7 +38,7 @@ const (
 	clientURL = "http://" + url
 
 	didDocNamespace = "did:sidetree"
-	basePath        = "/sidetree/0.0.1"
+	basePath        = "/sidetree/v1"
 
 	sha2_256        = 18
 	sampleNamespace = "sample:sidetree"
@@ -49,16 +51,20 @@ var (
 )
 
 func TestServer_Start(t *testing.T) {
-	didDocHandler := mocks.NewMockDocumentHandler().WithNamespace(didDocNamespace)
-	sampleDocHandler := mocks.NewMockDocumentHandler().WithNamespace(sampleNamespace)
+	didDocHandler := coremocks.NewMockDocumentHandler().WithNamespace(didDocNamespace)
+	sampleDocHandler := coremocks.NewMockDocumentHandler().WithNamespace(sampleNamespace)
+
+	pcp := mocks.NewMockProtocolClientProvider()
+	pc, err := pcp.ForNamespace(coremocks.DefaultNS)
+	require.NoError(t, err)
 
 	s := New(url,
 		"",
 		"",
 		"tk1",
-		diddochandler.NewUpdateHandler(basePath, didDocHandler),
-		diddochandler.NewResolveHandler(basePath, didDocHandler),
-		newSampleUpdateHandler(sampleDocHandler),
+		diddochandler.NewUpdateHandler(baseUpdatePath, didDocHandler, pc),
+		diddochandler.NewResolveHandler(baseResolvePath, didDocHandler),
+		newSampleUpdateHandler(sampleDocHandler, pc),
 		newSampleResolveHandler(sampleDocHandler),
 	)
 	require.NoError(t, s.Start())
@@ -207,9 +213,9 @@ type sampleUpdateHandler struct {
 	*dochandler.UpdateHandler
 }
 
-func newSampleUpdateHandler(processor dochandler.Processor) *sampleUpdateHandler {
+func newSampleUpdateHandler(processor dochandler.Processor, pc protocol.Client) *sampleUpdateHandler {
 	return &sampleUpdateHandler{
-		UpdateHandler: dochandler.NewUpdateHandler(processor),
+		UpdateHandler: dochandler.NewUpdateHandler(processor, pc),
 	}
 }
 
@@ -259,32 +265,44 @@ func (h *sampleResolveHandler) Handler() common.HTTPRequestHandler {
 }
 
 func getCreateRequest() ([]byte, error) {
-	testKey := &jws.JWK{
+	updateKey := &jws.JWK{
 		Crv: "crv",
 		Kty: "kty",
 		X:   "x",
 	}
 
-	c, err := commitment.Calculate(testKey, sha2_256, crypto.SHA256)
+	recoveryKey := &jws.JWK{
+		Crv: "crv",
+		Kty: "kty",
+		X:   "x",
+		Y:   "y",
+	}
+
+	updateCommitment, err := commitment.GetCommitment(updateKey, sha2_256)
 	if err != nil {
 		return nil, err
 	}
 
-	info := &helper.CreateRequestInfo{
+	recoveryCommitment, err := commitment.GetCommitment(recoveryKey, sha2_256)
+	if err != nil {
+		return nil, err
+	}
+
+	info := &client.CreateRequestInfo{
 		OpaqueDocument:     validDoc,
-		RecoveryCommitment: c,
-		UpdateCommitment:   c,
+		RecoveryCommitment: recoveryCommitment,
+		UpdateCommitment:   updateCommitment,
 		MultihashCode:      sha2_256,
 	}
-	return helper.NewCreateRequest(info)
+	return client.NewCreateRequest(info)
 }
 
 const validDoc = `{
 	"publicKey": [{
 		"id": "key-1",
-		"purpose": ["general"],
+		"purposes": ["authentication"],
 		"type": "JsonWebKey2020",
-		"jwk": {
+		"publicKeyJwk": {
 			"kty": "EC",
 			"crv": "P-256K",
 			"x": "PUymIqdtF_qxaAqPABSw-C-owT1KYYQbsMKFM-L9fJA",
